@@ -14,8 +14,8 @@ const PORT = process.env.PORT || 10000;
 const TICK_HZ = 30;
 const DT = 1 / TICK_HZ;
 
-const PLAYER_HP = 120;
-const BOT_HP = 60;
+const PLAYER_HP = 90;
+const BOT_HP = 40;
 
 const BOT_DAMAGE_MULT = 0.45;
 const BOT_FIRE_MULT = 1.45;
@@ -79,6 +79,7 @@ function circleIntersectsAABB(px, pz, r, box) {
   return (dx * dx + dz * dz) < (r * r);
 }
 
+// Push out of walls (iterative)
 function resolveCollisions(ent) {
   for (let iter = 0; iter < 7; iter++) {
     let pushed = false;
@@ -94,8 +95,27 @@ function resolveCollisions(ent) {
     }
     if (!pushed) break;
   }
+
+  // extra tiny nudge escape if still intersecting (rare edge cases)
+  for (const w of MAP.walls) {
+    if (circleIntersectsAABB(ent.x, ent.z, ent.r, w)) {
+      ent.x += (Math.random() - 0.5) * 0.05;
+      ent.z += (Math.random() - 0.5) * 0.05;
+      break;
+    }
+  }
+
   ent.x = clamp(ent.x, WORLD.minX, WORLD.maxX);
   ent.z = clamp(ent.z, WORLD.minZ, WORLD.maxZ);
+}
+
+// ✅ KEY FIX: move X then Z, resolving after each axis to slide along walls
+function moveAndCollide(ent, dx, dz) {
+  ent.x += dx;
+  resolveCollisions(ent);
+
+  ent.z += dz;
+  resolveCollisions(ent);
 }
 
 function spawnPoint(i) {
@@ -294,6 +314,7 @@ wss.on("connection", (ws) => {
 setInterval(() => {
   ensureBots(6);
 
+  // players update
   for (const p of players.values()) {
     if (p.hp <= 0) respawn(p);
 
@@ -306,15 +327,13 @@ setInterval(() => {
 
     if (WEAPONS[p.input.weapon]) p.weapon = p.input.weapon;
 
-    // Sprint (server authoritative)
-    // Sprint only if moving forward-ish (prevents infinite strafing sprint)
+    // sprint
     const wantsSprint = p.input.sprint && (p.input.w || p.input.a || p.input.d);
     p.sprint = wantsSprint ? 1 : 0;
 
-    const baseSpeed = 5.2;
-    const sprintMult = p.sprint ? 1.45 : 1.0;
-    const speed = baseSpeed * sprintMult;
+    const speed = BASE_SPEED * (p.sprint ? SPRINT_MULT : 1.0);
 
+    // WASD movement
     const fx = -Math.sin(p.yaw);
     const fz = -Math.cos(p.yaw);
     const rx = -fz;
@@ -329,11 +348,12 @@ setInterval(() => {
     const len = Math.hypot(mx, mz);
     if (len > 0.001) {
       mx /= len; mz /= len;
-      p.x += mx * speed * DT;
-      p.z += mz * speed * DT;
-      resolveCollisions(p);
+
+      // ✅ FIXED: axis-separated slide movement
+      moveAndCollide(p, mx * speed * DT, mz * speed * DT);
     }
 
+    // shooting
     p.cooldown = Math.max(0, p.cooldown - DT);
     const w = WEAPONS[p.weapon] ?? WEAPONS.rifle;
 
@@ -343,6 +363,7 @@ setInterval(() => {
     }
   }
 
+  // bots update
   for (const b of bots.values()) {
     if (b.hp <= 0) respawn(b);
 
@@ -354,11 +375,12 @@ setInterval(() => {
     const len = Math.hypot(mx, mz);
     if (len > 0.001) {
       mx /= len; mz /= len;
-      b.x += mx * speed * DT;
-      b.z += mz * speed * DT;
-      resolveCollisions(b);
+
+      // ✅ same slide fix for bots
+      moveAndCollide(b, mx * speed * DT, mz * speed * DT);
     }
 
+    // shoot
     b.cooldown = Math.max(0, b.cooldown - DT);
     const bw = WEAPONS.smg;
     if (ai.shoot && b.cooldown <= 0) {
@@ -367,6 +389,7 @@ setInterval(() => {
     }
   }
 
+  // bullets update + hits
   for (let i = bullets.length - 1; i >= 0; i--) {
     const k = bullets[i];
     k.life -= DT;
@@ -401,17 +424,25 @@ setInterval(() => {
     }
   }
 
+  // broadcast snapshot
   broadcast({
     t: "state",
     players: Array.from(players.values()).map(p => ({
-      id: p.id, name: p.name,
-      x: p.x, z: p.z, yaw: p.yaw,
-      hp: p.hp, score: p.score, weapon: p.weapon,
+      id: p.id,
+      x: p.x,
+      z: p.z,
+      yaw: p.yaw,
+      hp: p.hp,
+      score: p.score,
+      weapon: p.weapon,
       sprint: p.sprint
     })),
     bots: Array.from(bots.values()).map(b => ({
-      id: b.id, name: b.name,
-      x: b.x, z: b.z, yaw: b.yaw, hp: b.hp
+      id: b.id,
+      x: b.x,
+      z: b.z,
+      yaw: b.yaw,
+      hp: b.hp
     })),
     bullets: bullets.map(k => ({ id: k.id, owner: k.owner, x: k.x, z: k.z }))
   });
