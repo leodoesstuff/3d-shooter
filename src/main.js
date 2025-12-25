@@ -1,333 +1,422 @@
-import * as THREE from "three";
+import http from "http";
+import path from "path";
+import { fileURLToPath } from "url";
+import express from "express";
+import { WebSocketServer } from "ws";
+import crypto from "crypto";
 
-const hpEl = document.getElementById("hp");
-const scoreEl = document.getElementById("score");
-const weaponEl = document.getElementById("weapon");
-const blocker = document.getElementById("blocker");
-const playBtn = document.getElementById("playBtn");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-let myId = null;
-let HP = 120;
-let SCORE = 0;
+const PORT = process.env.PORT || 10000;
 
-function setHUD() {
-  hpEl.textContent = String(Math.max(0, Math.floor(HP)));
-  scoreEl.textContent = String(SCORE);
+// ---------- Tuning ----------
+const TICK_HZ = 30;
+const DT = 1 / TICK_HZ;
+
+const PLAYER_HP = 120;
+const BOT_HP = 60;
+
+const BOT_DAMAGE_MULT = 0.45;
+const BOT_FIRE_MULT = 1.45;
+const BOT_ACCURACY_MULT = 1.25;
+
+const WEAPONS = {
+  pistol: { damage: 10, fireDelay: 0.24, speed: 24, spread: 0.010 },
+  smg:    { damage: 6,  fireDelay: 0.10, speed: 26, spread: 0.030 },
+  rifle:  { damage: 9,  fireDelay: 0.13, speed: 30, spread: 0.016 },
+  sniper: { damage: 30, fireDelay: 0.85, speed: 44, spread: 0.003 }
+};
+
+const WORLD = {
+  minX: -30, maxX: 30,
+  minZ: -30, maxZ: 30
+};
+
+// ---------- Map (CS-ish blockout, AABB walls) ----------
+const MAP = {
+  walls: [
+    { x: 0, z: -31, w: 70, d: 2 },
+    { x: 0, z:  31, w: 70, d: 2 },
+    { x: -31, z: 0, w: 2, d: 70 },
+    { x:  31, z: 0, w: 2, d: 70 },
+
+    { x: 0, z: 0, w: 2, d: 34 },
+    { x: -10, z: -10, w: 22, d: 2 },
+    { x:  10, z:  10, w: 22, d: 2 },
+    { x: -14, z:  12, w: 2, d: 24 },
+    { x:  14, z: -12, w: 2, d: 24 },
+
+    { x: -18, z: -18, w: 8, d: 8 },
+    { x:  18, z:  18, w: 8, d: 8 },
+    { x: 0, z: 18, w: 10, d: 6 },
+    { x: 0, z: -18, w: 10, d: 6 }
+  ],
+  spawns: [
+    { x: -24, z: -24 },
+    { x:  24, z:  24 },
+    { x: -24, z:  24 },
+    { x:  24, z: -24 }
+  ]
+};
+
+function randId() {
+  return crypto.randomBytes(8).toString("hex");
 }
-setHUD();
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
-function weaponLabel(w) {
-  if (w === "pistol") return "PISTOL";
-  if (w === "smg") return "SMG";
-  if (w === "rifle") return "RIFLE";
-  if (w === "sniper") return "SNIPER";
-  return "RIFLE";
-}
+function circleIntersectsAABB(px, pz, r, box) {
+  const minX = box.x - box.w / 2;
+  const maxX = box.x + box.w / 2;
+  const minZ = box.z - box.d / 2;
+  const maxZ = box.z + box.d / 2;
 
-// ---------- Three ----------
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
-renderer.shadowMap.enabled = true;
+  const cx = clamp(px, minX, maxX);
+  const cz = clamp(pz, minZ, maxZ);
 
-// shooter-ish look
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.15;
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-
-document.body.appendChild(renderer.domElement);
-
-const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0x070a12, 10, 95);
-scene.background = new THREE.Color(0x070a12);
-
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 260);
-camera.position.set(0, 1.6, 6);
-
-// lights
-scene.add(new THREE.HemisphereLight(0xbad6ff, 0x0b1020, 0.9));
-const sun = new THREE.DirectionalLight(0xffffff, 1.25);
-sun.position.set(12, 22, 8);
-sun.castShadow = true;
-sun.shadow.mapSize.set(1024, 1024);
-scene.add(sun);
-
-// ground
-const groundGeo = new THREE.PlaneGeometry(140, 140, 24, 24);
-groundGeo.rotateX(-Math.PI / 2);
-const groundPos = groundGeo.attributes.position;
-for (let i = 0; i < groundPos.count; i++) {
-  const x = groundPos.getX(i);
-  const z = groundPos.getZ(i);
-  groundPos.setY(i, (Math.sin(x * 0.14) + Math.cos(z * 0.13)) * 0.22);
-}
-groundGeo.computeVertexNormals();
-
-const ground = new THREE.Mesh(
-  groundGeo,
-  new THREE.MeshStandardMaterial({ color: 0x121a2f, roughness: 1, metalness: 0 })
-);
-ground.receiveShadow = true;
-scene.add(ground);
-
-// ---------- Viewmodel gun + muzzle flash ----------
-const gun = new THREE.Group();
-const gunMat = new THREE.MeshStandardMaterial({ color: 0x1b2436, roughness: 0.35, metalness: 0.35 });
-const gunDark = new THREE.MeshStandardMaterial({ color: 0x0f141f, roughness: 0.4, metalness: 0.4 });
-
-const gunBody = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.18, 0.56), gunMat);
-gunBody.position.set(0.26, -0.25, -0.68);
-
-const gunTop = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.10, 0.30), gunDark);
-gunTop.position.set(0.26, -0.33, -0.74);
-
-const gunBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.35, 10), gunDark);
-gunBarrel.rotation.x = Math.PI / 2;
-gunBarrel.position.set(0.26, -0.23, -0.98);
-
-const flash = new THREE.Mesh(
-  new THREE.SphereGeometry(0.085, 10, 10),
-  new THREE.MeshStandardMaterial({ color: 0xfff2b0, emissive: 0xffdd66, emissiveIntensity: 2 })
-);
-flash.position.set(0.26, -0.23, -1.12);
-flash.visible = false;
-
-gun.add(gunBody, gunTop, gunBarrel, flash);
-camera.add(gun);
-scene.add(camera);
-
-let flashT = 0;
-let bobT = 0;
-
-// ---------- Pointer lock look ----------
-let locked = false;
-let yaw = 0;
-let pitch = 0;
-
-document.addEventListener("mousemove", (e) => {
-  if (!locked) return;
-  const sens = 0.0021;
-  yaw -= e.movementX * sens;
-  pitch -= e.movementY * sens;
-  pitch = Math.max(-1.25, Math.min(1.25, pitch));
-});
-
-function lockPointer() { renderer.domElement.requestPointerLock(); }
-playBtn.addEventListener("click", lockPointer);
-renderer.domElement.addEventListener("click", () => { if (!locked) lockPointer(); });
-
-document.addEventListener("pointerlockchange", () => {
-  locked = document.pointerLockElement === renderer.domElement;
-  blocker.style.display = locked ? "none" : "grid";
-});
-
-// ---------- Input ----------
-const keys = new Set();
-let mouseDown = false;
-let resetPressed = false;
-
-let currentWeapon = "rifle";
-weaponEl.textContent = weaponLabel(currentWeapon);
-
-addEventListener("keydown", (e) => {
-  keys.add(e.code);
-
-  if (e.code === "Digit1") currentWeapon = "pistol";
-  if (e.code === "Digit2") currentWeapon = "smg";
-  if (e.code === "Digit3") currentWeapon = "rifle";
-  if (e.code === "Digit4") currentWeapon = "sniper";
-  if (e.code === "KeyR") resetPressed = true;
-
-  weaponEl.textContent = weaponLabel(currentWeapon);
-});
-
-addEventListener("keyup", (e) => keys.delete(e.code));
-addEventListener("mousedown", (e) => { if (e.button === 0) mouseDown = true; });
-addEventListener("mouseup", (e) => { if (e.button === 0) mouseDown = false; });
-
-// ---------- Networking ----------
-const wsProto = location.protocol === "https:" ? "wss" : "ws";
-const ws = new WebSocket(`${wsProto}://${location.host}`);
-
-let mapBuilt = false;
-const wallMeshes = [];
-
-const others = new Map(); // id -> mesh
-const botMeshes = new Map(); // id -> mesh
-const bulletMeshes = new Map(); // id -> mesh
-
-const matWall = new THREE.MeshStandardMaterial({ color: 0x2a3c66, roughness: 0.95, metalness: 0 });
-const matOther = new THREE.MeshStandardMaterial({ color: 0x57a1ff, roughness: 0.65, metalness: 0.1 });
-const matBot = new THREE.MeshStandardMaterial({ color: 0xff4d6d, roughness: 0.85, metalness: 0.05 });
-const matBullet = new THREE.MeshStandardMaterial({ color: 0xffeaa0, roughness: 0.6, metalness: 0.1 });
-
-function buildMap(map) {
-  for (const w of map.walls) {
-    const geo = new THREE.BoxGeometry(w.w, 3, w.d);
-    const m = new THREE.Mesh(geo, matWall);
-    m.position.set(w.x, 1.5, w.z);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    scene.add(m);
-    wallMeshes.push(m);
-  }
-
-  // extra props for vibes
-  for (let i = 0; i < 22; i++) {
-    const ww = 0.8 + Math.random() * 1.8;
-    const hh = 0.7 + Math.random() * 2.1;
-    const dd = 0.8 + Math.random() * 1.8;
-    const box = new THREE.Mesh(
-      new THREE.BoxGeometry(ww, hh, dd),
-      new THREE.MeshStandardMaterial({ color: 0x2f4b86, roughness: 0.9, metalness: 0 })
-    );
-    box.position.set((Math.random() - 0.5) * 45, hh / 2, (Math.random() - 0.5) * 45);
-    box.castShadow = true;
-    box.receiveShadow = true;
-    scene.add(box);
-  }
-
-  mapBuilt = true;
+  const dx = px - cx;
+  const dz = pz - cz;
+  return (dx * dx + dz * dz) < (r * r);
 }
 
-ws.addEventListener("message", (ev) => {
-  const msg = JSON.parse(ev.data);
+function resolveCollisions(ent) {
+  for (let iter = 0; iter < 7; iter++) {
+    let pushed = false;
+    for (const w of MAP.walls) {
+      if (circleIntersectsAABB(ent.x, ent.z, ent.r, w)) {
+        const dx = ent.x - w.x;
+        const dz = ent.z - w.z;
+        const len = Math.hypot(dx, dz) || 1;
+        ent.x += (dx / len) * 0.14;
+        ent.z += (dz / len) * 0.14;
+        pushed = true;
+      }
+    }
+    if (!pushed) break;
+  }
+  ent.x = clamp(ent.x, WORLD.minX, WORLD.maxX);
+  ent.z = clamp(ent.z, WORLD.minZ, WORLD.maxZ);
+}
 
-  if (msg.t === "welcome") {
-    myId = msg.id;
-    if (!mapBuilt) buildMap(msg.map);
+function spawnPoint(i) {
+  const s = MAP.spawns[i % MAP.spawns.length];
+  return { x: s.x, z: s.z };
+}
+
+function makePlayer(id) {
+  const sp = spawnPoint(Math.floor(Math.random() * 9999));
+  return {
+    id,
+    name: "Player",
+    x: sp.x,
+    z: sp.z,
+    yaw: 0,
+    hp: PLAYER_HP,
+    score: 0,
+    r: 0.55,
+    weapon: "rifle",
+    sprint: 0,
+    input: { w:0,a:0,s:0,d:0,shoot:0,yaw:0,weapon:"rifle",reset:0,sprint:0 },
+    cooldown: 0
+  };
+}
+
+function makeBot(id) {
+  const sp = spawnPoint(Math.floor(Math.random() * 9999));
+  return {
+    id,
+    name: "Bot",
+    x: sp.x,
+    z: sp.z,
+    yaw: 0,
+    hp: BOT_HP,
+    r: 0.55,
+    cooldown: 0,
+    targetId: null,
+    wanderT: 0,
+    wx: sp.x,
+    wz: sp.z
+  };
+}
+
+function respawn(ent) {
+  const sp = spawnPoint(Math.floor(Math.random() * 9999));
+  ent.x = sp.x;
+  ent.z = sp.z;
+  ent.hp = ent.id?.startsWith("b_") ? BOT_HP : PLAYER_HP;
+}
+
+const players = new Map();
+const bots = new Map();
+const bullets = [];
+
+function ensureBots(n = 6) {
+  while (bots.size < n) {
+    const id = "b_" + randId();
+    bots.set(id, makeBot(id));
+  }
+}
+ensureBots(6);
+
+function fireBullet(owner, x, z, yaw, weaponName, isBot = false) {
+  const w = WEAPONS[weaponName] ?? WEAPONS.rifle;
+
+  const spreadMult = isBot ? BOT_ACCURACY_MULT : 1;
+  const spread = w.spread * spreadMult;
+  const jitter = (Math.random() - 0.5) * 2 * spread;
+  const yaw2 = yaw + jitter;
+
+  const vx = -Math.sin(yaw2) * w.speed;
+  const vz = -Math.cos(yaw2) * w.speed;
+
+  const dmg = isBot ? Math.max(1, Math.round(w.damage * BOT_DAMAGE_MULT)) : w.damage;
+
+  bullets.push({
+    id: "k_" + randId(),
+    owner,
+    x,
+    z,
+    vx,
+    vz,
+    life: 1.1,
+    damage: dmg
+  });
+}
+
+function bulletHits(b, ent) {
+  const dx = b.x - ent.x;
+  const dz = b.z - ent.z;
+  const rr = (ent.r + 0.12);
+  return (dx * dx + dz * dz) < (rr * rr);
+}
+
+function bulletInWall(b) {
+  for (const w of MAP.walls) {
+    const minX = w.x - w.w / 2, maxX = w.x + w.w / 2;
+    const minZ = w.z - w.d / 2, maxZ = w.z + w.d / 2;
+    if (b.x >= minX && b.x <= maxX && b.z >= minZ && b.z <= maxZ) return true;
+  }
+  return false;
+}
+
+// ---------- Bot AI ----------
+function pickClosestTarget(bot) {
+  let best = null;
+  let bestD = Infinity;
+  for (const p of players.values()) {
+    const dx = p.x - bot.x;
+    const dz = p.z - bot.z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 < bestD) { bestD = d2; best = p; }
+  }
+  return best;
+}
+
+function botThink(bot) {
+  const t = pickClosestTarget(bot);
+  bot.targetId = t?.id ?? null;
+
+  if (!t) {
+    bot.wanderT -= DT;
+    if (bot.wanderT <= 0) {
+      bot.wanderT = 1.6 + Math.random() * 2.4;
+      bot.wx = clamp((Math.random() - 0.5) * 50, WORLD.minX, WORLD.maxX);
+      bot.wz = clamp((Math.random() - 0.5) * 50, WORLD.minZ, WORLD.maxZ);
+    }
+    const dx = bot.wx - bot.x;
+    const dz = bot.wz - bot.z;
+    const aimYaw = Math.atan2(-dx, -dz);
+    return { moveX: dx, moveZ: dz, shoot: false, aimYaw };
   }
 
-  if (msg.t === "state") {
-    // players
-    const seenPlayers = new Set();
-    for (const p of msg.players) {
-      seenPlayers.add(p.id);
+  const dx = t.x - bot.x;
+  const dz = t.z - bot.z;
+  const dist = Math.hypot(dx, dz) || 1;
 
-      if (p.id === myId) {
-        HP = p.hp;
-        SCORE = p.score;
-        setHUD();
+  const aimYaw = Math.atan2(-dx, -dz);
+  const wantShoot = dist < 16;
 
-        // snap weapon name if server sends it
-        if (p.weapon) weaponEl.textContent = weaponLabel(p.weapon);
+  let moveX = dx, moveZ = dz;
+  if (dist < 6) { moveX = -dx; moveZ = -dz; }
 
-        // move camera toward server position
-        camera.position.lerp(new THREE.Vector3(p.x, 1.6, p.z), 0.45);
-        camera.rotation.set(pitch, yaw, 0, "YXZ");
-        continue;
-      }
+  return { moveX, moveZ, shoot: wantShoot, aimYaw };
+}
 
-      let mesh = others.get(p.id);
-      if (!mesh) {
-        mesh = new THREE.Mesh(new THREE.CapsuleGeometry(0.45, 0.8, 6, 10), matOther);
-        mesh.castShadow = true;
-        scene.add(mesh);
-        others.set(p.id, mesh);
-      }
-      mesh.position.lerp(new THREE.Vector3(p.x, 1.05, p.z), 0.6);
-      mesh.rotation.y = p.yaw;
-    }
+// ---------- Web server ----------
+const app = express();
+app.use(express.static(path.join(__dirname, "dist")));
+app.get("*", (req, res) => res.sendFile(path.join(__dirname, "dist", "index.html")));
 
-    for (const [id, m] of others) {
-      if (!seenPlayers.has(id)) {
-        scene.remove(m);
-        others.delete(id);
-      }
-    }
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
 
-    // bots
-    const seenBots = new Set();
-    for (const b of msg.bots) {
-      seenBots.add(b.id);
-      let mesh = botMeshes.get(b.id);
-      if (!mesh) {
-        mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(0.75, 0), matBot);
-        mesh.castShadow = true;
-        scene.add(mesh);
-        botMeshes.set(b.id, mesh);
-      }
-      mesh.position.lerp(new THREE.Vector3(b.x, 0.8, b.z), 0.6);
-      mesh.rotation.y = b.yaw;
-    }
-
-    for (const [id, m] of botMeshes) {
-      if (!seenBots.has(id)) {
-        scene.remove(m);
-        botMeshes.delete(id);
-      }
-    }
-
-    // bullets
-    const seenBullets = new Set();
-    for (const k of msg.bullets) {
-      seenBullets.add(k.id);
-      let bm = bulletMeshes.get(k.id);
-      if (!bm) {
-        bm = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 8), matBullet);
-        bm.castShadow = true;
-        scene.add(bm);
-        bulletMeshes.set(k.id, bm);
-      }
-      bm.position.set(k.x, 1.25, k.z);
-    }
-
-    for (const [id, bm] of bulletMeshes) {
-      if (!seenBullets.has(id)) {
-        scene.remove(bm);
-        bulletMeshes.delete(id);
-      }
-    }
+function broadcast(obj) {
+  const msg = JSON.stringify(obj);
+  for (const c of wss.clients) {
+    if (c.readyState === 1) c.send(msg);
   }
+}
+
+wss.on("connection", (ws) => {
+  const id = randId();
+  const pl = makePlayer(id);
+  players.set(id, pl);
+
+  ws.send(JSON.stringify({ t: "welcome", id, map: MAP }));
+
+  ws.on("message", (data) => {
+    let msg;
+    try { msg = JSON.parse(String(data)); } catch { return; }
+    const p = players.get(id);
+    if (!p) return;
+
+    if (msg.t === "input") {
+      p.input = {
+        w: msg.w ? 1 : 0,
+        a: msg.a ? 1 : 0,
+        s: msg.s ? 1 : 0,
+        d: msg.d ? 1 : 0,
+        shoot: msg.shoot ? 1 : 0,
+        yaw: Number(msg.yaw) || 0,
+        weapon: typeof msg.weapon === "string" ? msg.weapon : p.weapon,
+        reset: msg.reset ? 1 : 0,
+        sprint: msg.sprint ? 1 : 0
+      };
+    }
+  });
+
+  ws.on("close", () => {
+    players.delete(id);
+  });
 });
 
-// send input at 30hz
+// ---------- Game loop ----------
 setInterval(() => {
-  if (ws.readyState !== 1) return;
+  ensureBots(6);
 
-  const shooting = locked && mouseDown;
+  for (const p of players.values()) {
+    if (p.hp <= 0) respawn(p);
 
-  // muzzle flash + small kick feel
-  if (shooting) {
-    flashT = 0.05;
+    p.yaw = p.input.yaw;
+
+    if (p.input.reset) {
+      respawn(p);
+      p.input.reset = 0;
+    }
+
+    if (WEAPONS[p.input.weapon]) p.weapon = p.input.weapon;
+
+    // Sprint (server authoritative)
+    // Sprint only if moving forward-ish (prevents infinite strafing sprint)
+    const wantsSprint = p.input.sprint && (p.input.w || p.input.a || p.input.d);
+    p.sprint = wantsSprint ? 1 : 0;
+
+    const baseSpeed = 5.2;
+    const sprintMult = p.sprint ? 1.45 : 1.0;
+    const speed = baseSpeed * sprintMult;
+
+    const fx = -Math.sin(p.yaw);
+    const fz = -Math.cos(p.yaw);
+    const rx = -fz;
+    const rz = fx;
+
+    let mx = 0, mz = 0;
+    if (p.input.w) { mx += fx; mz += fz; }
+    if (p.input.s) { mx -= fx; mz -= fz; }
+    if (p.input.d) { mx += rx; mz += rz; }
+    if (p.input.a) { mx -= rx; mz -= rz; }
+
+    const len = Math.hypot(mx, mz);
+    if (len > 0.001) {
+      mx /= len; mz /= len;
+      p.x += mx * speed * DT;
+      p.z += mz * speed * DT;
+      resolveCollisions(p);
+    }
+
+    p.cooldown = Math.max(0, p.cooldown - DT);
+    const w = WEAPONS[p.weapon] ?? WEAPONS.rifle;
+
+    if (p.input.shoot && p.cooldown <= 0) {
+      p.cooldown = w.fireDelay;
+      fireBullet(p.id, p.x, p.z, p.yaw, p.weapon, false);
+    }
   }
 
-  ws.send(JSON.stringify({
-    t: "input",
-    w: keys.has("KeyW"),
-    a: keys.has("KeyA"),
-    s: keys.has("KeyS"),
-    d: keys.has("KeyD"),
-    shoot: shooting,
-    yaw,
-    weapon: currentWeapon,
-    reset: resetPressed
-  }));
-  resetPressed = false;
-}, 1000 / 30);
+  for (const b of bots.values()) {
+    if (b.hp <= 0) respawn(b);
 
-// render loop
-let last = performance.now();
-function loop(now) {
-  const dt = Math.min(0.033, (now - last) / 1000);
-  last = now;
+    const ai = botThink(b);
+    b.yaw = ai.aimYaw;
 
-  // viewmodel bobbing
-  const moving = keys.has("KeyW") || keys.has("KeyA") || keys.has("KeyS") || keys.has("KeyD");
-  bobT += dt * (moving ? 10 : 3);
-  gun.position.x = Math.sin(bobT) * (moving ? 0.02 : 0.006);
-  gun.position.y = Math.abs(Math.cos(bobT)) * (moving ? 0.02 : 0.006);
+    const speed = 4.1;
+    let mx = ai.moveX, mz = ai.moveZ;
+    const len = Math.hypot(mx, mz);
+    if (len > 0.001) {
+      mx /= len; mz /= len;
+      b.x += mx * speed * DT;
+      b.z += mz * speed * DT;
+      resolveCollisions(b);
+    }
 
-  flashT = Math.max(0, flashT - dt);
-  flash.visible = flashT > 0;
+    b.cooldown = Math.max(0, b.cooldown - DT);
+    const bw = WEAPONS.smg;
+    if (ai.shoot && b.cooldown <= 0) {
+      b.cooldown = bw.fireDelay * BOT_FIRE_MULT;
+      fireBullet(b.id, b.x, b.z, b.yaw, "smg", true);
+    }
+  }
 
-  renderer.render(scene, camera);
-  requestAnimationFrame(loop);
-}
-requestAnimationFrame(loop);
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const k = bullets[i];
+    k.life -= DT;
+    k.x += k.vx * DT;
+    k.z += k.vz * DT;
 
-addEventListener("resize", () => {
-  camera.aspect = innerWidth / innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
+    if (k.life <= 0 || bulletInWall(k)) {
+      bullets.splice(i, 1);
+      continue;
+    }
+
+    for (const p of players.values()) {
+      if (p.id === k.owner) continue;
+      if (bulletHits(k, p)) {
+        p.hp -= (k.damage ?? 6);
+        if (p.hp <= 0) {
+          const killer = players.get(k.owner);
+          if (killer) killer.score += 1;
+        }
+        bullets.splice(i, 1);
+        break;
+      }
+    }
+
+    for (const b of bots.values()) {
+      if (b.id === k.owner) continue;
+      if (bulletHits(k, b)) {
+        b.hp -= (k.damage ?? 6);
+        bullets.splice(i, 1);
+        break;
+      }
+    }
+  }
+
+  broadcast({
+    t: "state",
+    players: Array.from(players.values()).map(p => ({
+      id: p.id, name: p.name,
+      x: p.x, z: p.z, yaw: p.yaw,
+      hp: p.hp, score: p.score, weapon: p.weapon,
+      sprint: p.sprint
+    })),
+    bots: Array.from(bots.values()).map(b => ({
+      id: b.id, name: b.name,
+      x: b.x, z: b.z, yaw: b.yaw, hp: b.hp
+    })),
+    bullets: bullets.map(k => ({ id: k.id, owner: k.owner, x: k.x, z: k.z }))
+  });
+}, 1000 / TICK_HZ);
+
+server.listen(PORT, () => {
+  console.log("Server listening on", PORT);
 });
