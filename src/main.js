@@ -2,38 +2,52 @@ import * as THREE from "three";
 
 const hpEl = document.getElementById("hp");
 const scoreEl = document.getElementById("score");
-const ammoEl = document.getElementById("ammo");
+const weaponEl = document.getElementById("weapon");
 const blocker = document.getElementById("blocker");
 const playBtn = document.getElementById("playBtn");
 
 let myId = null;
-let HP = 100;
+let HP = 120;
 let SCORE = 0;
 
 function setHUD() {
   hpEl.textContent = String(Math.max(0, Math.floor(HP)));
   scoreEl.textContent = String(SCORE);
-  ammoEl.textContent = "∞";
 }
 setHUD();
 
-// ---------- Three.js ----------
+function weaponLabel(w) {
+  if (w === "pistol") return "PISTOL";
+  if (w === "smg") return "SMG";
+  if (w === "rifle") return "RIFLE";
+  if (w === "sniper") return "SNIPER";
+  return "RIFLE";
+}
+
+// ---------- Three ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
 renderer.shadowMap.enabled = true;
+
+// shooter-ish look
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0x0b0f1a, 12, 90);
-scene.background = new THREE.Color(0x0b0f1a);
+scene.fog = new THREE.Fog(0x070a12, 10, 95);
+scene.background = new THREE.Color(0x070a12);
 
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 250);
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 260);
 camera.position.set(0, 1.6, 6);
 
-scene.add(new THREE.HemisphereLight(0xbad6ff, 0x1b2233, 0.9));
-const sun = new THREE.DirectionalLight(0xffffff, 1.2);
-sun.position.set(10, 18, 8);
+// lights
+scene.add(new THREE.HemisphereLight(0xbad6ff, 0x0b1020, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 1.25);
+sun.position.set(12, 22, 8);
 sun.castShadow = true;
 sun.shadow.mapSize.set(1024, 1024);
 scene.add(sun);
@@ -48,12 +62,42 @@ for (let i = 0; i < groundPos.count; i++) {
   groundPos.setY(i, (Math.sin(x * 0.14) + Math.cos(z * 0.13)) * 0.22);
 }
 groundGeo.computeVertexNormals();
+
 const ground = new THREE.Mesh(
   groundGeo,
-  new THREE.MeshStandardMaterial({ color: 0x1a2440, roughness: 1 })
+  new THREE.MeshStandardMaterial({ color: 0x121a2f, roughness: 1, metalness: 0 })
 );
 ground.receiveShadow = true;
 scene.add(ground);
+
+// ---------- Viewmodel gun + muzzle flash ----------
+const gun = new THREE.Group();
+const gunMat = new THREE.MeshStandardMaterial({ color: 0x1b2436, roughness: 0.35, metalness: 0.35 });
+const gunDark = new THREE.MeshStandardMaterial({ color: 0x0f141f, roughness: 0.4, metalness: 0.4 });
+
+const gunBody = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.18, 0.56), gunMat);
+gunBody.position.set(0.26, -0.25, -0.68);
+
+const gunTop = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.10, 0.30), gunDark);
+gunTop.position.set(0.26, -0.33, -0.74);
+
+const gunBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.35, 10), gunDark);
+gunBarrel.rotation.x = Math.PI / 2;
+gunBarrel.position.set(0.26, -0.23, -0.98);
+
+const flash = new THREE.Mesh(
+  new THREE.SphereGeometry(0.085, 10, 10),
+  new THREE.MeshStandardMaterial({ color: 0xfff2b0, emissive: 0xffdd66, emissiveIntensity: 2 })
+);
+flash.position.set(0.26, -0.23, -1.12);
+flash.visible = false;
+
+gun.add(gunBody, gunTop, gunBarrel, flash);
+camera.add(gun);
+scene.add(camera);
+
+let flashT = 0;
+let bobT = 0;
 
 // ---------- Pointer lock look ----------
 let locked = false;
@@ -80,8 +124,23 @@ document.addEventListener("pointerlockchange", () => {
 // ---------- Input ----------
 const keys = new Set();
 let mouseDown = false;
+let resetPressed = false;
 
-addEventListener("keydown", (e) => keys.add(e.code));
+let currentWeapon = "rifle";
+weaponEl.textContent = weaponLabel(currentWeapon);
+
+addEventListener("keydown", (e) => {
+  keys.add(e.code);
+
+  if (e.code === "Digit1") currentWeapon = "pistol";
+  if (e.code === "Digit2") currentWeapon = "smg";
+  if (e.code === "Digit3") currentWeapon = "rifle";
+  if (e.code === "Digit4") currentWeapon = "sniper";
+  if (e.code === "KeyR") resetPressed = true;
+
+  weaponEl.textContent = weaponLabel(currentWeapon);
+});
+
 addEventListener("keyup", (e) => keys.delete(e.code));
 addEventListener("mousedown", (e) => { if (e.button === 0) mouseDown = true; });
 addEventListener("mouseup", (e) => { if (e.button === 0) mouseDown = false; });
@@ -91,20 +150,18 @@ const wsProto = location.protocol === "https:" ? "wss" : "ws";
 const ws = new WebSocket(`${wsProto}://${location.host}`);
 
 let mapBuilt = false;
-let wallMeshes = [];
+const wallMeshes = [];
 
 const others = new Map(); // id -> mesh
-const bots = new Map();   // id -> mesh
+const botMeshes = new Map(); // id -> mesh
 const bulletMeshes = new Map(); // id -> mesh
 
-const matWall = new THREE.MeshStandardMaterial({ color: 0x2c3f6a, roughness: 0.95 });
-const matMe = new THREE.MeshStandardMaterial({ color: 0x4cffb2, roughness: 0.7 });
-const matOther = new THREE.MeshStandardMaterial({ color: 0x57a1ff, roughness: 0.7 });
-const matBot = new THREE.MeshStandardMaterial({ color: 0xff4d6d, roughness: 0.85 });
-const matBullet = new THREE.MeshStandardMaterial({ color: 0xffeaa0, roughness: 0.6 });
+const matWall = new THREE.MeshStandardMaterial({ color: 0x2a3c66, roughness: 0.95, metalness: 0 });
+const matOther = new THREE.MeshStandardMaterial({ color: 0x57a1ff, roughness: 0.65, metalness: 0.1 });
+const matBot = new THREE.MeshStandardMaterial({ color: 0xff4d6d, roughness: 0.85, metalness: 0.05 });
+const matBullet = new THREE.MeshStandardMaterial({ color: 0xffeaa0, roughness: 0.6, metalness: 0.1 });
 
 function buildMap(map) {
-  // walls
   for (const w of map.walls) {
     const geo = new THREE.BoxGeometry(w.w, 3, w.d);
     const m = new THREE.Mesh(geo, matWall);
@@ -115,13 +172,16 @@ function buildMap(map) {
     wallMeshes.push(m);
   }
 
-  // some extra props for vibes (client-only)
-  for (let i = 0; i < 18; i++) {
-    const w = 0.8 + Math.random() * 1.6;
-    const h = 0.6 + Math.random() * 1.8;
-    const d = 0.8 + Math.random() * 1.6;
-    const box = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({ color: 0x334a7a, roughness: 0.9 }));
-    box.position.set((Math.random() - 0.5) * 45, h / 2, (Math.random() - 0.5) * 45);
+  // extra props for vibes
+  for (let i = 0; i < 22; i++) {
+    const ww = 0.8 + Math.random() * 1.8;
+    const hh = 0.7 + Math.random() * 2.1;
+    const dd = 0.8 + Math.random() * 1.8;
+    const box = new THREE.Mesh(
+      new THREE.BoxGeometry(ww, hh, dd),
+      new THREE.MeshStandardMaterial({ color: 0x2f4b86, roughness: 0.9, metalness: 0 })
+    );
+    box.position.set((Math.random() - 0.5) * 45, hh / 2, (Math.random() - 0.5) * 45);
     box.castShadow = true;
     box.receiveShadow = true;
     scene.add(box);
@@ -140,17 +200,20 @@ ws.addEventListener("message", (ev) => {
 
   if (msg.t === "state") {
     // players
-    const seen = new Set();
+    const seenPlayers = new Set();
     for (const p of msg.players) {
-      seen.add(p.id);
+      seenPlayers.add(p.id);
 
       if (p.id === myId) {
         HP = p.hp;
         SCORE = p.score;
         setHUD();
 
-        // camera follows server position (smoothly)
-        camera.position.lerp(new THREE.Vector3(p.x, 1.6, p.z), 0.4);
+        // snap weapon name if server sends it
+        if (p.weapon) weaponEl.textContent = weaponLabel(p.weapon);
+
+        // move camera toward server position
+        camera.position.lerp(new THREE.Vector3(p.x, 1.6, p.z), 0.45);
         camera.rotation.set(pitch, yaw, 0, "YXZ");
         continue;
       }
@@ -166,9 +229,8 @@ ws.addEventListener("message", (ev) => {
       mesh.rotation.y = p.yaw;
     }
 
-    // cleanup disconnected players
     for (const [id, m] of others) {
-      if (!seen.has(id)) {
+      if (!seenPlayers.has(id)) {
         scene.remove(m);
         others.delete(id);
       }
@@ -178,20 +240,21 @@ ws.addEventListener("message", (ev) => {
     const seenBots = new Set();
     for (const b of msg.bots) {
       seenBots.add(b.id);
-      let mesh = bots.get(b.id);
+      let mesh = botMeshes.get(b.id);
       if (!mesh) {
         mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(0.75, 0), matBot);
         mesh.castShadow = true;
         scene.add(mesh);
-        bots.set(b.id, mesh);
+        botMeshes.set(b.id, mesh);
       }
       mesh.position.lerp(new THREE.Vector3(b.x, 0.8, b.z), 0.6);
       mesh.rotation.y = b.yaw;
     }
-    for (const [id, m] of bots) {
+
+    for (const [id, m] of botMeshes) {
       if (!seenBots.has(id)) {
         scene.remove(m);
-        bots.delete(id);
+        botMeshes.delete(id);
       }
     }
 
@@ -208,6 +271,7 @@ ws.addEventListener("message", (ev) => {
       }
       bm.position.set(k.x, 1.25, k.z);
     }
+
     for (const [id, bm] of bulletMeshes) {
       if (!seenBullets.has(id)) {
         scene.remove(bm);
@@ -220,23 +284,47 @@ ws.addEventListener("message", (ev) => {
 // send input at 30hz
 setInterval(() => {
   if (ws.readyState !== 1) return;
+
+  const shooting = locked && mouseDown;
+
+  // muzzle flash + small kick feel
+  if (shooting) {
+    flashT = 0.05;
+  }
+
   ws.send(JSON.stringify({
     t: "input",
     w: keys.has("KeyW"),
     a: keys.has("KeyA"),
     s: keys.has("KeyS"),
     d: keys.has("KeyD"),
-    shoot: locked && mouseDown,
-    yaw
+    shoot: shooting,
+    yaw,
+    weapon: currentWeapon,
+    reset: resetPressed
   }));
+  resetPressed = false;
 }, 1000 / 30);
 
-// simple camera feel even before first state
-function renderLoop() {
+// render loop
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.033, (now - last) / 1000);
+  last = now;
+
+  // viewmodel bobbing
+  const moving = keys.has("KeyW") || keys.has("KeyA") || keys.has("KeyS") || keys.has("KeyD");
+  bobT += dt * (moving ? 10 : 3);
+  gun.position.x = Math.sin(bobT) * (moving ? 0.02 : 0.006);
+  gun.position.y = Math.abs(Math.cos(bobT)) * (moving ? 0.02 : 0.006);
+
+  flashT = Math.max(0, flashT - dt);
+  flash.visible = flashT > 0;
+
   renderer.render(scene, camera);
-  requestAnimationFrame(renderLoop);
+  requestAnimationFrame(loop);
 }
-requestAnimationFrame(renderLoop);
+requestAnimationFrame(loop);
 
 addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight;
