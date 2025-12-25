@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Poly Shooter</title>
+    <style>
+      html,body{margin:0;height:100%;background:#0b0f1a;overflow:hidden;font-family:system-ui}
+      #hud{position:fixed;inset:0;pointer-events:none;color:#fff}
+      #centerDot{position:absolute;left:50%;top:50%;width:6px;height:6px;margin:-3px 0 0 -3px;border-radius:999px;background:#fff;opacity:.85}
+      #panel{position:absolute;left:16px;top:16px;display:flex;gap:10px;align-items:center;
+        background:rgba(0,0,0,.35);backdrop-filter:blur(10px);padding:10px 12px;border-radius:14px}
+      #panel b{font-weight:700}
+      #hint{position:absolute;left:50%;bottom:22px;transform:translateX(-50%);
+        background:rgba(0,0,0,.35);backdrop-filter:blur(10px);padding:10px 12px;border-radius:14px}
+      #blocker{
+        position:fixed;inset:0;display:grid;place-items:center;background:rgba(0,0,0,.55);
+        color:#fff;text-align:center
+      }
+      #card{
+        width:min(520px,90vw);padding:18px 18px 14px;border-radius:18px;
+        background:rgba(18,24,40,.85);box-shadow:0 20px 80px rgba(0,0,0,.45)
+      }
+      button{
+        all:unset;cursor:pointer;display:inline-block;margin-top:12px;
+        padding:10px 14px;border-radius:14px;background:#2a6bff;
+        font-weight:700
+      }
+      .small{opacity:.85;font-size:14px;line-height:1.35}
+      a{color:#9ec1ff}
+    </style>
+  </head>
+  <body>
+    <div id="hud">
+      <div id="centerDot"></div>
+      <div id="panel">
+        <div><b>HP</b>: <span id="hp">100</span></div>
+        <div><b>Score</b>: <span id="score">0</span></div>
+        <div><b>Ammo</b>: <span id="ammo">∞</span></div>
+      </div>
+      <div id="hint" class="small">
+        WASD move · Mouse aim · Click shoot · Shift sprint · R reset
+      </div>
+    </div>
+
+    <div id="blocker">
+      <div id="card">
+        <h2 style="margin:0 0 8px">Poly Shooter</h2>
+        <div class="small">
+          Click to lock mouse (pointer lock). Survive and rack up score.
+          <br/>Tip: keep moving and headshot (aim center mass for now 😄).
+        </div>
+        <button id="playBtn">Play</button>
+        <div class="small" style="margin-top:10px;opacity:.7">
+          If pointer lock fails, click the page once, then click Play again.
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
