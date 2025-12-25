@@ -17,6 +17,10 @@ const DT = 1 / TICK_HZ;
 const PLAYER_HP = 90;
 const BOT_HP = 40;
 
+// Movement
+const BASE_SPEED = 5.2;
+const SPRINT_MULT = 1.45;
+
 const BOT_DAMAGE_MULT = 0.45;
 const BOT_FIRE_MULT = 1.45;
 const BOT_ACCURACY_MULT = 1.25;
@@ -33,7 +37,7 @@ const WORLD = {
   minZ: -30, maxZ: 30
 };
 
-// ---------- Map (CS-ish blockout, AABB walls) ----------
+// ---------- Map ----------
 const MAP = {
   walls: [
     { x: 0, z: -31, w: 70, d: 2 },
@@ -96,7 +100,7 @@ function resolveCollisions(ent) {
     if (!pushed) break;
   }
 
-  // extra tiny nudge escape if still intersecting (rare edge cases)
+  // tiny nudge escape for rare edge overlaps
   for (const w of MAP.walls) {
     if (circleIntersectsAABB(ent.x, ent.z, ent.r, w)) {
       ent.x += (Math.random() - 0.5) * 0.05;
@@ -376,7 +380,7 @@ setInterval(() => {
     if (len > 0.001) {
       mx /= len; mz /= len;
 
-      // ✅ same slide fix for bots
+      // ✅ slide fix for bots too
       moveAndCollide(b, mx * speed * DT, mz * speed * DT);
     }
 
